@@ -27,7 +27,9 @@ jobs:
       - name: Clone wiki repository with embedded token
         run: |
           git clone https://x-access-token:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-repo
-        shell: bash      - name: Check repository structure and copy images if available
+        shell: bash
+
+      - name: Check repository structure and copy images if available
         run: |
           mkdir -p output-files
           # List the wiki-repo contents to debug
@@ -54,7 +56,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pandoc wkhtmltopdf
-        shell: bash      - name: Process images
+        shell: bash
+
+      - name: Process images
         run: |
           cd wiki-repo
           # Create a script for image processing
@@ -102,7 +106,9 @@ jobs:
           
           chmod +x process-images.sh
           ./process-images.sh
-        shell: bash      - name: Generate PDFs
+        shell: bash
+
+      - name: Generate PDFs
         run: |
           cd wiki-repo
           mkdir -p ../output-files/pdfs
@@ -164,7 +170,9 @@ jobs:
           # List generated PDFs
           echo "Generated PDFs:"
           ls -la ../output-files/pdfs/
-        shell: bash      - name: Copy PDFs to bugsweeper-docs repository
+        shell: bash
+
+      - name: Copy PDFs to bugsweeper-docs repository
         run: |
           # Create workshop-pdfs directory if it doesn't exist
           mkdir -p bugsweeper-docs/workshop-pdfs
