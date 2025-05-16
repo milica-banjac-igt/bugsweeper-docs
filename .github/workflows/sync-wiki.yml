@@ -19,11 +19,10 @@ jobs:
           path: bugsweeper-docs
           # Use a fine-grained PAT stored in repository secrets
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      
-      # Clone the wiki repository
+        # Clone the wiki repository using PAT for authentication
       - name: Clone wiki repository
         run: |
-          git clone https://github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-source
+          git clone https://oauth2:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-source
         shell: bash
       
       - name: List wiki contents
