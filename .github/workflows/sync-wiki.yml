@@ -9,7 +9,7 @@ on:
 
 jobs:
   sync-wiki-to-pages:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest  # Changed to Ubuntu for better tool support
     steps:
       - name: Check out bugsweeper-docs repository
         uses: actions/checkout@v3
@@ -29,95 +29,97 @@ jobs:
           git clone https://x-access-token:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-repo
         shell: bash
 
+      - name: Copy images directory to ensure proper file access
+        run: |
+          mkdir -p output-files
+          cp -r wiki-repo/Images output-files/
+        shell: bash
+
+      - name: Install required tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc wkhtmltopdf
+        shell: bash
+
       - name: Process images
         run: |
           cd wiki-repo
-          # Create a PowerShell script for image processing
-          $imageScript = @'
-          $mdFiles = Get-ChildItem -Path . -Filter *.md
-          $images = Get-ChildItem -Path .\Images -File
-
-          foreach ($mdFile in $mdFiles) {
-              Write-Host "Processing file: $($mdFile.Name)"
-
-              $content = Get-Content $mdFile.FullName -Raw
-
-              # Find all unique GitHub asset URLs in the file
-              $pattern = 'https://github.com/user-attachments/assets/([\w-]+)'
-              $matches = [regex]::Matches($content, $pattern)
-              $uniqueHashes = $matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
-
-              foreach ($hash in $uniqueHashes) {
-                  # Find image where filename (without extension) ends with -$hash or is exactly $hash
-                  $image = $images | Where-Object {
-                      $nameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
-                      return $nameNoExt -eq $hash -or $nameNoExt -match "-" + [regex]::Escape($hash) + "$"
-                  } | Select-Object -First 1
-                  if ($image) {
-                      $localPath = "./Images/" + $image.Name 
-                      $urlPattern = "https://github.com/user-attachments/assets/$hash"
-                      $content = $content -replace [regex]::Escape($urlPattern), $localPath
-                      Write-Host "Replacing $urlPattern with $localPath"
-                  } else {
-                      Write-Host "No local image found for hash: $hash"
-                  }
-              }
-
-              Set-Content $mdFile.FullName -Value $content
-              Write-Host "Updated file: $($mdFile.Name)"
-          }
-
-          Write-Host "Process completed!"
-          '@
-          $imageScript | Out-File -FilePath process-images.ps1 -Encoding UTF8
+          # Create a script for image processing
+          cat > process-images.sh << 'EOL'
+          #!/bin/bash
+          for mdfile in *.md; do
+            echo "Processing file: $mdfile"
+            content=$(cat "$mdfile")
+            
+            # Find unique GitHub asset URLs and replace them
+            grep -o 'https://github.com/user-attachments/assets/[a-zA-Z0-9-]*' "$mdfile" | sort | uniq | while read url; do
+              hash=$(echo "$url" | sed 's|.*/||')
+              image=$(find ./Images -type f -name "*$hash*" -o -name "$hash.*" | head -1)
+              
+              if [ -n "$image" ]; then
+                localpath="./Images/$(basename "$image")"
+                echo "Replacing $url with $localpath"
+                sed -i "s|$url|$localpath|g" "$mdfile"
+              else
+                echo "No local image found for hash: $hash"
+              fi
+            done
+            
+            echo "Updated file: $mdfile"
+          done
+          echo "Process completed!"
+          EOL
           
-          powershell -ExecutionPolicy Bypass -File process-images.ps1
-        shell: pwsh
-
-      - name: Install pandoc for PDF generation
-        run: |
-          choco install pandoc --no-progress -y
-          choco install miktex --no-progress -y
-        shell: pwsh
+          chmod +x process-images.sh
+          ./process-images.sh
+        shell: bash
 
       - name: Generate PDFs
         run: |
           cd wiki-repo
-          # Create a PowerShell script for PDF generation
-          $pdfScript = @'
+          mkdir -p ../output-files/pdfs
+          
           # Get all MD files but exclude readme files for the sync scripts
-          $mdFiles = Get-ChildItem -Path . -Filter *.md | Where-Object { $_.Name -notlike "wiki-sync-readme*" } | Sort-Object Name
-          
-          foreach ($mdFile in $mdFiles) {
-              $pdfFileName = [System.IO.Path]::ChangeExtension($mdFile.Name, ".pdf")
-              Write-Host "Converting $($mdFile.Name) to PDF..."
-              
-              # Use pandoc to convert markdown to PDF
-              pandoc $mdFile.FullName -o $pdfFileName --pdf-engine=xelatex -V geometry:"margin=1in" --standalone
-          }
-          '@
-          $pdfScript | Out-File -FilePath generate-pdfs.ps1 -Encoding UTF8
-          
-          powershell -ExecutionPolicy Bypass -File generate-pdfs.ps1
-        shell: pwsh
+          for mdfile in $(ls -1 *.md | grep -v "wiki-sync-readme"); do
+            pdffile="../output-files/pdfs/$(basename "${mdfile%.md}.pdf")"
+            echo "Converting $mdfile to PDF..."
+            
+            # Use wkhtmltopdf instead of pandoc+xelatex
+            pandoc "$mdfile" -o "$pdffile" --pdf-engine=wkhtmltopdf
+            
+            if [ ! -f "$pdffile" ]; then
+              echo "Failed to create PDF for $mdfile, trying alternative method..."
+              # Fallback to direct wkhtmltopdf if pandoc fails
+              pandoc "$mdfile" -o temp.html
+              wkhtmltopdf temp.html "$pdffile"
+              rm temp.html
+            fi
+            
+            echo "PDF generation for $mdfile complete"
+          done
+        shell: bash
 
       - name: Copy PDFs to bugsweeper-docs repository
         run: |
           # Create workshop-pdfs directory if it doesn't exist
           mkdir -p bugsweeper-docs/workshop-pdfs
-
+          
           # Copy PDF files
-          Get-ChildItem -Path wiki-repo -Filter *.pdf | ForEach-Object {
-              Copy-Item -Path $_.FullName -Destination "bugsweeper-docs/workshop-pdfs/$($_.Name)" -Force
-              Write-Host "Copied $($_.Name) to GitHub Pages repository"
-          }
-        shell: pwsh
+          cp -f output-files/pdfs/*.pdf bugsweeper-docs/workshop-pdfs/ || true
+          
+          # List files to debug
+          echo "Files in output-files/pdfs:"
+          ls -la output-files/pdfs/
+          echo "Files in bugsweeper-docs/workshop-pdfs:"
+          ls -la bugsweeper-docs/workshop-pdfs/
+        shell: bash
 
       - name: Create index.html
         run: |
-          $pdfFiles = Get-ChildItem -Path bugsweeper-docs/workshop-pdfs -Filter *.pdf
+          cd bugsweeper-docs
           
-          $indexContent = @"
+          # Generate index.html
+          cat > index.html << EOL
           <!DOCTYPE html>
           <html lang="en">
           <head>
@@ -167,35 +169,33 @@ jobs:
               <p>This page provides access to the latest PDF documentation for the BugSweeper Workshops.</p>
               
               <ul class="pdf-list">
-          "@
-              
+          EOL
+          
           # Add links to each PDF file
-          foreach ($pdf in $pdfFiles) {
-              $pdfRelativePath = "workshop-pdfs/" + $pdf.Name
-              $workshopName = $pdf.BaseName -replace '-‐-', ' - '
-              $indexContent += @"
-                  <li><a href="$pdfRelativePath" target="_blank">$workshopName</a></li>
-          "@
-          }
+          for pdf in workshop-pdfs/*.pdf; do
+            if [ -f "$pdf" ]; then
+              filename=$(basename "$pdf")
+              name=$(echo "${filename%.pdf}" | sed 's/-‐-/ - /g')
+              echo "    <li><a href=\"$pdf\" target=\"_blank\">$name</a></li>" >> index.html
+            fi
+          done
           
           # Close the HTML content
-          $indexContent += @"
+          cat >> index.html << EOL
               </ul>
               
-              <p class="timestamp">Last updated: $(Get-Date -Format "MMMM dd, yyyy HH:mm")</p>
+              <p class="timestamp">Last updated: $(date '+%B %d, %Y %H:%M')</p>
           </body>
           </html>
-          "@
+          EOL
           
-          # Write the index.html file
-          $indexContent | Out-File -FilePath bugsweeper-docs/index.html -Encoding UTF8
-          Write-Host "Created index.html file"
-        shell: pwsh
+          echo "Created index.html file"
+        shell: bash
 
       - name: Commit and push changes to GitHub Pages
         run: |
           cd bugsweeper-docs
           git add --all
-          git commit -m "Updated workshop PDFs - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+          git commit -m "Updated workshop PDFs - $(date '+%Y-%m-%d %H:%M')"
           git push origin main
-        shell: pwsh
+        shell: bash
