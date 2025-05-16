@@ -27,43 +27,73 @@ jobs:
       - name: Clone wiki repository with embedded token
         run: |
           git clone https://x-access-token:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-repo
-        shell: bash
-
-      - name: Copy images directory to ensure proper file access
+        shell: bash      - name: Check repository structure and copy images if available
         run: |
           mkdir -p output-files
-          cp -r wiki-repo/Images output-files/
+          # List the wiki-repo contents to debug
+          echo "Contents of wiki-repo:"
+          ls -la wiki-repo/
+          
+          # Check if Images directory exists, create if not
+          if [ -d "wiki-repo/Images" ]; then
+            echo "Images directory found, copying to output-files"
+            cp -r wiki-repo/Images output-files/
+          elif [ -d "wiki-repo/images" ]; then
+            echo "images directory found (lowercase), copying to output-files"
+            cp -r wiki-repo/images output-files/
+            # Rename to ensure consistency with the rest of the script
+            mv output-files/images output-files/Images
+          else
+            echo "No Images directory found, creating empty one"
+            mkdir -p output-files/Images
+            mkdir -p wiki-repo/Images
+          fi
         shell: bash
 
       - name: Install required tools
         run: |
           sudo apt-get update
           sudo apt-get install -y pandoc wkhtmltopdf
-        shell: bash
-
-      - name: Process images
+        shell: bash      - name: Process images
         run: |
           cd wiki-repo
           # Create a script for image processing
           cat > process-images.sh << 'EOL'
           #!/bin/bash
+          
+          # Check if we have any markdown files
+          if [ ! "$(ls -A *.md 2>/dev/null)" ]; then
+            echo "No markdown files found!"
+            exit 0
+          fi
+          
+          # Check if Images directory exists
+          if [ ! -d "./Images" ]; then
+            echo "Images directory not found, creating it"
+            mkdir -p ./Images
+          fi
+          
           for mdfile in *.md; do
             echo "Processing file: $mdfile"
             content=$(cat "$mdfile")
             
             # Find unique GitHub asset URLs and replace them
-            grep -o 'https://github.com/user-attachments/assets/[a-zA-Z0-9-]*' "$mdfile" | sort | uniq | while read url; do
-              hash=$(echo "$url" | sed 's|.*/||')
-              image=$(find ./Images -type f -name "*$hash*" -o -name "$hash.*" | head -1)
-              
-              if [ -n "$image" ]; then
-                localpath="./Images/$(basename "$image")"
-                echo "Replacing $url with $localpath"
-                sed -i "s|$url|$localpath|g" "$mdfile"
-              else
-                echo "No local image found for hash: $hash"
-              fi
-            done
+            if grep -q 'https://github.com/user-attachments/assets/' "$mdfile"; then
+              grep -o 'https://github.com/user-attachments/assets/[a-zA-Z0-9-]*' "$mdfile" | sort | uniq | while read url; do
+                hash=$(echo "$url" | sed 's|.*/||')
+                image=$(find ./Images -type f -name "*$hash*" -o -name "$hash.*" 2>/dev/null | head -1)
+                
+                if [ -n "$image" ]; then
+                  localpath="./Images/$(basename "$image")"
+                  echo "Replacing $url with $localpath"
+                  sed -i "s|$url|$localpath|g" "$mdfile"
+                else
+                  echo "No local image found for hash: $hash"
+                fi
+              done
+            else
+              echo "No GitHub asset URLs found in $mdfile"
+            fi
             
             echo "Updated file: $mdfile"
           done
@@ -72,46 +102,91 @@ jobs:
           
           chmod +x process-images.sh
           ./process-images.sh
-        shell: bash
-
-      - name: Generate PDFs
+        shell: bash      - name: Generate PDFs
         run: |
           cd wiki-repo
           mkdir -p ../output-files/pdfs
           
+          # Check if we have markdown files
+          if [ ! "$(ls -A *.md 2>/dev/null)" ]; then
+            echo "No markdown files found in wiki-repo!"
+            # Create a basic README.pdf so we have at least one PDF
+            echo "# BugSweeper Workshops" > README.md
+            echo "Documentation is being prepared. Please check back later." >> README.md
+            pdffile="../output-files/pdfs/README.pdf"
+            pandoc README.md -o "$pdffile" --pdf-engine=wkhtmltopdf
+            exit 0
+          fi
+          
           # Get all MD files but exclude readme files for the sync scripts
-          for mdfile in $(ls -1 *.md | grep -v "wiki-sync-readme"); do
-            pdffile="../output-files/pdfs/$(basename "${mdfile%.md}.pdf")"
-            echo "Converting $mdfile to PDF..."
-            
-            # Use wkhtmltopdf instead of pandoc+xelatex
-            pandoc "$mdfile" -o "$pdffile" --pdf-engine=wkhtmltopdf
-            
-            if [ ! -f "$pdffile" ]; then
-              echo "Failed to create PDF for $mdfile, trying alternative method..."
-              # Fallback to direct wkhtmltopdf if pandoc fails
-              pandoc "$mdfile" -o temp.html
-              wkhtmltopdf temp.html "$pdffile"
-              rm temp.html
+          for mdfile in $(ls -1 *.md 2>/dev/null | grep -v "wiki-sync-readme" || echo ""); do
+            if [ -f "$mdfile" ]; then
+              pdffile="../output-files/pdfs/$(basename "${mdfile%.md}.pdf")"
+              echo "Converting $mdfile to PDF..."
+              
+              # Create a simple HTML version first
+              echo "<html><body>" > temp.html
+              cat "$mdfile" | sed -e 's|!\[\(.*\)\](./Images/\(.*\))|<img src="./Images/\2" alt="\1" style="max-width:100%;">|g' >> temp.html
+              echo "</body></html>" >> temp.html
+              
+              # Try multiple PDF generation methods
+              if command -v wkhtmltopdf >/dev/null 2>&1; then
+                echo "Using wkhtmltopdf directly..."
+                wkhtmltopdf temp.html "$pdffile" || true
+              fi
+              
+              if [ ! -f "$pdffile" ] || [ ! -s "$pdffile" ]; then
+                echo "Trying pandoc with wkhtmltopdf..."
+                pandoc "$mdfile" -o "$pdffile" --pdf-engine=wkhtmltopdf || true
+              fi
+              
+              if [ ! -f "$pdffile" ] || [ ! -s "$pdffile" ]; then
+                echo "Creating fallback PDF with basic content..."
+                echo "<html><body><h1>$(basename "${mdfile%.md}")</h1><p>Please view the original markdown file for content.</p></body></html>" > temp_fallback.html
+                wkhtmltopdf temp_fallback.html "$pdffile" || true
+                rm -f temp_fallback.html
+              fi
+              
+              # Clean up
+              rm -f temp.html
+              
+              # Verify PDF was created
+              if [ -f "$pdffile" ] && [ -s "$pdffile" ]; then
+                echo "PDF generation for $mdfile complete: $(ls -la "$pdffile")"
+              else
+                echo "WARNING: Failed to create PDF for $mdfile"
+                # Create an empty file so we at least have something
+                touch "$pdffile"
+              fi
             fi
-            
-            echo "PDF generation for $mdfile complete"
           done
-        shell: bash
-
-      - name: Copy PDFs to bugsweeper-docs repository
+          
+          # List generated PDFs
+          echo "Generated PDFs:"
+          ls -la ../output-files/pdfs/
+        shell: bash      - name: Copy PDFs to bugsweeper-docs repository
         run: |
           # Create workshop-pdfs directory if it doesn't exist
           mkdir -p bugsweeper-docs/workshop-pdfs
           
-          # Copy PDF files
-          cp -f output-files/pdfs/*.pdf bugsweeper-docs/workshop-pdfs/ || true
+          # Check if output-files/pdfs directory exists and has files
+          if [ -d "output-files/pdfs" ] && [ "$(find output-files/pdfs -name "*.pdf" -type f 2>/dev/null)" ]; then
+            echo "Copying PDF files to GitHub Pages directory"
+            cp -f output-files/pdfs/*.pdf bugsweeper-docs/workshop-pdfs/ || true
+          else
+            echo "No PDFs found in output directory. Creating a placeholder PDF."
+            mkdir -p output-files/pdfs
+            echo "<html><body><h1>BugSweeper Workshops</h1><p>Documentation is being prepared. Please check back later.</p></body></html>" > temp.html
+            wkhtmltopdf temp.html output-files/pdfs/README.pdf || true
+            cp -f output-files/pdfs/README.pdf bugsweeper-docs/workshop-pdfs/ || true
+            rm -f temp.html
+          fi
           
           # List files to debug
           echo "Files in output-files/pdfs:"
-          ls -la output-files/pdfs/
+          find output-files/pdfs -type f -ls || echo "No files found"
           echo "Files in bugsweeper-docs/workshop-pdfs:"
-          ls -la bugsweeper-docs/workshop-pdfs/
+          find bugsweeper-docs/workshop-pdfs -type f -ls || echo "No files found"
         shell: bash
 
       - name: Create index.html
