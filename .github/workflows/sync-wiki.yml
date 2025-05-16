@@ -1,0 +1,202 @@
+name: Sync Wiki to GitHub Pages
+
+on:
+  schedule:
+    # Run at 1:00 AM UTC every day (adjust as needed)
+    - cron: '0 1 * * *'
+  # Allow manual triggering from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  sync-wiki-to-pages:
+    runs-on: windows-latest
+    steps:
+      - name: Check out bugsweeper-docs repository
+        uses: actions/checkout@v3
+        with:
+          repository: milica-banjac-igt/bugsweeper-docs
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: bugsweeper-docs
+
+      - name: Check out wiki repository
+        uses: actions/checkout@v3
+        with:
+          repository: igt-all/BugSweeper-Workshops.wiki
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: wiki-repo
+
+      - name: Set up Git identity
+        run: |
+          git config --global user.email "wiki-sync@example.com"
+          git config --global user.name "Wiki Sync Action"
+
+      - name: Process images
+        run: |
+          cd wiki-repo
+          # Create a PowerShell script for image processing
+          $imageScript = @'
+          $mdFiles = Get-ChildItem -Path . -Filter *.md
+          $images = Get-ChildItem -Path .\Images -File
+
+          foreach ($mdFile in $mdFiles) {
+              Write-Host "Processing file: $($mdFile.Name)"
+
+              $content = Get-Content $mdFile.FullName -Raw
+
+              # Find all unique GitHub asset URLs in the file
+              $pattern = 'https://github.com/user-attachments/assets/([\w-]+)'
+              $matches = [regex]::Matches($content, $pattern)
+              $uniqueHashes = $matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+
+              foreach ($hash in $uniqueHashes) {
+                  # Find image where filename (without extension) ends with -$hash or is exactly $hash
+                  $image = $images | Where-Object {
+                      $nameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+                      return $nameNoExt -eq $hash -or $nameNoExt -match "-" + [regex]::Escape($hash) + "$"
+                  } | Select-Object -First 1
+                  if ($image) {
+                      $localPath = "./Images/" + $image.Name 
+                      $urlPattern = "https://github.com/user-attachments/assets/$hash"
+                      $content = $content -replace [regex]::Escape($urlPattern), $localPath
+                      Write-Host "Replacing $urlPattern with $localPath"
+                  } else {
+                      Write-Host "No local image found for hash: $hash"
+                  }
+              }
+
+              Set-Content $mdFile.FullName -Value $content
+              Write-Host "Updated file: $($mdFile.Name)"
+          }
+
+          Write-Host "Process completed!"
+          '@
+          $imageScript | Out-File -FilePath process-images.ps1 -Encoding UTF8
+          
+          powershell -ExecutionPolicy Bypass -File process-images.ps1
+        shell: pwsh
+
+      - name: Install pandoc for PDF generation
+        run: |
+          choco install pandoc --no-progress -y
+          choco install miktex --no-progress -y
+        shell: pwsh
+
+      - name: Generate PDFs
+        run: |
+          cd wiki-repo
+          # Create a PowerShell script for PDF generation
+          $pdfScript = @'
+          # Get all MD files but exclude readme files for the sync scripts
+          $mdFiles = Get-ChildItem -Path . -Filter *.md | Where-Object { $_.Name -notlike "wiki-sync-readme*" } | Sort-Object Name
+          
+          foreach ($mdFile in $mdFiles) {
+              $pdfFileName = [System.IO.Path]::ChangeExtension($mdFile.Name, ".pdf")
+              Write-Host "Converting $($mdFile.Name) to PDF..."
+              
+              # Use pandoc to convert markdown to PDF
+              pandoc $mdFile.FullName -o $pdfFileName --pdf-engine=xelatex -V geometry:"margin=1in" --standalone
+          }
+          '@
+          $pdfScript | Out-File -FilePath generate-pdfs.ps1 -Encoding UTF8
+          
+          powershell -ExecutionPolicy Bypass -File generate-pdfs.ps1
+        shell: pwsh
+
+      - name: Copy PDFs to bugsweeper-docs repository
+        run: |
+          # Create workshop-pdfs directory if it doesn't exist
+          mkdir -p bugsweeper-docs/workshop-pdfs
+
+          # Copy PDF files
+          Get-ChildItem -Path wiki-repo -Filter *.pdf | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination "bugsweeper-docs/workshop-pdfs/$($_.Name)" -Force
+              Write-Host "Copied $($_.Name) to GitHub Pages repository"
+          }
+        shell: pwsh
+
+      - name: Create index.html
+        run: |
+          $pdfFiles = Get-ChildItem -Path bugsweeper-docs/workshop-pdfs -Filter *.pdf
+          
+          $indexContent = @"
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>BugSweeper Workshops Documentation</title>
+              <style>
+                  body {
+                      font-family: Arial, sans-serif;
+                      line-height: 1.6;
+                      max-width: 800px;
+                      margin: 0 auto;
+                      padding: 20px;
+                  }
+                  h1 {
+                      color: #333;
+                      text-align: center;
+                  }
+                  .pdf-list {
+                      list-style: none;
+                      padding: 0;
+                  }
+                  .pdf-list li {
+                      margin: 10px 0;
+                      padding: 10px;
+                      background-color: #f5f5f5;
+                      border-radius: 5px;
+                  }
+                  .pdf-list a {
+                      color: #0066cc;
+                      text-decoration: none;
+                      font-weight: bold;
+                  }
+                  .pdf-list a:hover {
+                      text-decoration: underline;
+                  }
+                  .timestamp {
+                      color: #666;
+                      font-size: 0.8em;
+                      text-align: center;
+                      margin-top: 40px;
+                  }
+              </style>
+          </head>
+          <body>
+              <h1>BugSweeper Workshops Documentation</h1>
+              <p>This page provides access to the latest PDF documentation for the BugSweeper Workshops.</p>
+              
+              <ul class="pdf-list">
+          "@
+              
+          # Add links to each PDF file
+          foreach ($pdf in $pdfFiles) {
+              $pdfRelativePath = "workshop-pdfs/" + $pdf.Name
+              $workshopName = $pdf.BaseName -replace '-‐-', ' - '
+              $indexContent += @"
+                  <li><a href="$pdfRelativePath" target="_blank">$workshopName</a></li>
+          "@
+          }
+          
+          # Close the HTML content
+          $indexContent += @"
+              </ul>
+              
+              <p class="timestamp">Last updated: $(Get-Date -Format "MMMM dd, yyyy HH:mm")</p>
+          </body>
+          </html>
+          "@
+          
+          # Write the index.html file
+          $indexContent | Out-File -FilePath bugsweeper-docs/index.html -Encoding UTF8
+          Write-Host "Created index.html file"
+        shell: pwsh
+
+      - name: Commit and push changes to GitHub Pages
+        run: |
+          cd bugsweeper-docs
+          git add --all
+          git commit -m "Updated workshop PDFs - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+          git push origin main
+        shell: pwsh
