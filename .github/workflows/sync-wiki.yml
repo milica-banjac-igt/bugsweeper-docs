@@ -1,208 +1,148 @@
-name: Sync Wiki to GitHub Pages
+name: BugSweeper Wiki to PDF
 
 on:
+  # Run every night at 1:00 AM UTC
   schedule:
-    # Run at 1:00 AM UTC every day (adjust as needed)
     - cron: '0 1 * * *'
-  # Allow manual triggering from the GitHub Actions tab
+  # Allow manual triggering
   workflow_dispatch:
 
 jobs:
-  sync-wiki-to-pages:
-    runs-on: ubuntu-latest  # Changed to Ubuntu for better tool support
+  convert-wiki-to-pdf:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out bugsweeper-docs repository
+      # Checkout the target repository where PDFs will be pushed
+      - name: Checkout destination repository
         uses: actions/checkout@v3
         with:
           repository: milica-banjac-igt/bugsweeper-docs
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           path: bugsweeper-docs
-
-      - name: Set up Git identity
+          # Use a fine-grained PAT stored in repository secrets
+          token: ${{ secrets.WIKI_TOKEN }}
+      
+      # Clone the wiki repository
+      - name: Clone wiki repository
         run: |
-          git config --global user.email "wiki-sync@example.com"
-          git config --global user.name "Wiki Sync Action"
-
-      # Using git clone with token embedded instead of actions/checkout for the wiki
-      - name: Clone wiki repository with embedded token
-        run: |
-          git clone https://x-access-token:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-repo
+          git clone https://github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-source
         shell: bash
-
-      - name: Check repository structure and copy images if available
+      
+      - name: List wiki contents
         run: |
-          mkdir -p output-files
-          # List the wiki-repo contents to debug
-          echo "Contents of wiki-repo:"
-          ls -la wiki-repo/
+          echo "Wiki repo contents:"
+          ls -la wiki-source/
+          echo "Checking for markdown files:"
+          find wiki-source -name "*.md" | sort
+        shell: bash
+      
+      # Download images from GitHub if they exist
+      - name: Setup Images directory
+        run: |
+          mkdir -p wiki-source/Images
           
-          # Check if Images directory exists, create if not
-          if [ -d "wiki-repo/Images" ]; then
-            echo "Images directory found, copying to output-files"
-            cp -r wiki-repo/Images output-files/
-          elif [ -d "wiki-repo/images" ]; then
-            echo "images directory found (lowercase), copying to output-files"
-            cp -r wiki-repo/images output-files/
-            # Rename to ensure consistency with the rest of the script
-            mv output-files/images output-files/Images
+          # Find all image references in markdown files
+          echo "Extracting image references from Markdown files..."
+          grep -r '!\[.*\](.*user-attachments/assets/[a-zA-Z0-9-]*)' wiki-source --include="*.md" | cut -d'(' -f2 | cut -d')' -f1 > image_urls.txt
+          
+          if [ -s image_urls.txt ]; then
+            echo "Found image URLs:"
+            cat image_urls.txt
+            
+            # Download placeholder images - we can't directly access user-attachments
+            # We'll use placeholder images with the original filenames
+            mkdir -p placeholder_images
+            cat image_urls.txt | while read url; do
+              hash=$(echo "$url" | sed 's|.*/||')
+              echo "Creating placeholder for $hash"
+              # Create a simple HTML file as placeholder (will be visible in the PDF)
+              echo "<div style='border:1px solid #ddd; padding:10px; text-align:center; background:#f8f8f8; margin:10px;'><p>Image placeholder for: $hash</p><p>The original image is only available in GitHub UI</p></div>" > "placeholder_images/$hash.html"
+              cp "placeholder_images/$hash.html" "wiki-source/Images/$hash.png"
+            done
           else
-            echo "No Images directory found, creating empty one"
-            mkdir -p output-files/Images
-            mkdir -p wiki-repo/Images
+            echo "No image references found"
+          fi
+          
+          # If there's an existing Images directory in the wiki-source, preserve its contents
+          if [ -d "wiki-source/Images" ]; then
+            echo "Found Images directory in wiki repo:"
+            ls -la wiki-source/Images/
+          else
+            echo "No Images directory found in wiki repo, creating one"
+            mkdir -p wiki-source/Images
           fi
         shell: bash
-
-      - name: Install required tools
+      
+      # Install required tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y pandoc wkhtmltopdf
         shell: bash
-
-      - name: Process images
+      
+      # Process and modify markdown files to use local image references
+      - name: Process markdown files
         run: |
-          cd wiki-repo
-          # Create a script for image processing
-          cat > process-images.sh << 'EOL'
-          #!/bin/bash
-          
-          # Check if we have any markdown files
-          if [ ! "$(ls -A *.md 2>/dev/null)" ]; then
-            echo "No markdown files found!"
-            exit 0
-          fi
-          
-          # Check if Images directory exists
-          if [ ! -d "./Images" ]; then
-            echo "Images directory not found, creating it"
-            mkdir -p ./Images
-          fi
-          
-          for mdfile in *.md; do
-            echo "Processing file: $mdfile"
-            content=$(cat "$mdfile")
-            
-            # Find unique GitHub asset URLs and replace them
-            if grep -q 'https://github.com/user-attachments/assets/' "$mdfile"; then
-              grep -o 'https://github.com/user-attachments/assets/[a-zA-Z0-9-]*' "$mdfile" | sort | uniq | while read url; do
-                hash=$(echo "$url" | sed 's|.*/||')
-                image=$(find ./Images -type f -name "*$hash*" -o -name "$hash.*" 2>/dev/null | head -1)
-                
-                if [ -n "$image" ]; then
-                  localpath="./Images/$(basename "$image")"
-                  echo "Replacing $url with $localpath"
-                  sed -i "s|$url|$localpath|g" "$mdfile"
-                else
-                  echo "No local image found for hash: $hash"
-                fi
-              done
-            else
-              echo "No GitHub asset URLs found in $mdfile"
+          for mdfile in wiki-source/*.md; do
+            if [ -f "$mdfile" ]; then
+              echo "Processing $mdfile"
+              
+              # Replace GitHub attachment URLs with local references
+              sed -i 's|https://github.com/user-attachments/assets/\([a-zA-Z0-9-]*\)|./Images/\1.png|g' "$mdfile"
+              
+              # Add a note about images at the top
+              sed -i '1i > **Note:** Some images in this document are replaced with placeholders as they are only available in the GitHub UI.\n\n' "$mdfile"
             fi
-            
-            echo "Updated file: $mdfile"
           done
-          echo "Process completed!"
-          EOL
-          
-          chmod +x process-images.sh
-          ./process-images.sh
         shell: bash
-
+      
+      # Generate PDFs from markdown files
       - name: Generate PDFs
         run: |
-          cd wiki-repo
-          mkdir -p ../output-files/pdfs
+          mkdir -p pdfs
           
-          # Check if we have markdown files
-          if [ ! "$(ls -A *.md 2>/dev/null)" ]; then
-            echo "No markdown files found in wiki-repo!"
-            # Create a basic README.pdf so we have at least one PDF
-            echo "# BugSweeper Workshops" > README.md
-            echo "Documentation is being prepared. Please check back later." >> README.md
-            pdffile="../output-files/pdfs/README.pdf"
-            pandoc README.md -o "$pdffile" --pdf-engine=wkhtmltopdf
-            exit 0
-          fi
-          
-          # Get all MD files but exclude readme files for the sync scripts
-          for mdfile in $(ls -1 *.md 2>/dev/null | grep -v "wiki-sync-readme" || echo ""); do
-            if [ -f "$mdfile" ]; then
-              pdffile="../output-files/pdfs/$(basename "${mdfile%.md}.pdf")"
-              echo "Converting $mdfile to PDF..."
+          # Loop through each markdown file
+          for mdfile in wiki-source/*.md; do
+            if [ -f "$mdfile" ] && [[ ! "$(basename "$mdfile")" =~ ^wiki-sync-readme ]]; then
+              filename=$(basename "$mdfile")
+              pdfname="${filename%.md}.pdf"
+              echo "Converting $filename to PDF..."
               
-              # Create a simple HTML version first
-              echo "<html><body>" > temp.html
-              cat "$mdfile" | sed -e 's|!\[\(.*\)\](./Images/\(.*\))|<img src="./Images/\2" alt="\1" style="max-width:100%;">|g' >> temp.html
-              echo "</body></html>" >> temp.html
+              # Convert Markdown to HTML first for better image handling
+              pandoc "$mdfile" -o "temp.html" --standalone
               
-              # Try multiple PDF generation methods
-              if command -v wkhtmltopdf >/dev/null 2>&1; then
-                echo "Using wkhtmltopdf directly..."
-                wkhtmltopdf temp.html "$pdffile" || true
-              fi
+              # Convert HTML to PDF
+              wkhtmltopdf --enable-local-file-access "temp.html" "pdfs/$pdfname"
               
-              if [ ! -f "$pdffile" ] || [ ! -s "$pdffile" ]; then
-                echo "Trying pandoc with wkhtmltopdf..."
-                pandoc "$mdfile" -o "$pdffile" --pdf-engine=wkhtmltopdf || true
-              fi
-              
-              if [ ! -f "$pdffile" ] || [ ! -s "$pdffile" ]; then
-                echo "Creating fallback PDF with basic content..."
-                echo "<html><body><h1>$(basename "${mdfile%.md}")</h1><p>Please view the original markdown file for content.</p></body></html>" > temp_fallback.html
-                wkhtmltopdf temp_fallback.html "$pdffile" || true
-                rm -f temp_fallback.html
-              fi
-              
-              # Clean up
-              rm -f temp.html
-              
-              # Verify PDF was created
-              if [ -f "$pdffile" ] && [ -s "$pdffile" ]; then
-                echo "PDF generation for $mdfile complete: $(ls -la "$pdffile")"
+              if [ -f "pdfs/$pdfname" ]; then
+                echo "Successfully generated $pdfname"
               else
-                echo "WARNING: Failed to create PDF for $mdfile"
-                # Create an empty file so we at least have something
-                touch "$pdffile"
+                echo "Failed to generate PDF for $filename, creating basic version..."
+                echo "<html><body><h1>$(basename "$filename" .md)</h1><p>PDF conversion failed. Please check the original markdown file.</p></body></html>" > "basic.html"
+                wkhtmltopdf "basic.html" "pdfs/$pdfname" || touch "pdfs/$pdfname"
+                rm -f "basic.html"
               fi
             fi
           done
           
           # List generated PDFs
           echo "Generated PDFs:"
-          ls -la ../output-files/pdfs/
+          ls -la pdfs/
         shell: bash
-
-      - name: Copy PDFs to bugsweeper-docs repository
+      
+      # Copy PDFs to the docs repository
+      - name: Copy PDFs to docs repository
         run: |
-          # Create workshop-pdfs directory if it doesn't exist
           mkdir -p bugsweeper-docs/workshop-pdfs
+          cp -f pdfs/*.pdf bugsweeper-docs/workshop-pdfs/ || true
           
-          # Check if output-files/pdfs directory exists and has files
-          if [ -d "output-files/pdfs" ] && [ "$(find output-files/pdfs -name "*.pdf" -type f 2>/dev/null)" ]; then
-            echo "Copying PDF files to GitHub Pages directory"
-            cp -f output-files/pdfs/*.pdf bugsweeper-docs/workshop-pdfs/ || true
-          else
-            echo "No PDFs found in output directory. Creating a placeholder PDF."
-            mkdir -p output-files/pdfs
-            echo "<html><body><h1>BugSweeper Workshops</h1><p>Documentation is being prepared. Please check back later.</p></body></html>" > temp.html
-            wkhtmltopdf temp.html output-files/pdfs/README.pdf || true
-            cp -f output-files/pdfs/README.pdf bugsweeper-docs/workshop-pdfs/ || true
-            rm -f temp.html
-          fi
-          
-          # List files to debug
-          echo "Files in output-files/pdfs:"
-          find output-files/pdfs -type f -ls || echo "No files found"
-          echo "Files in bugsweeper-docs/workshop-pdfs:"
-          find bugsweeper-docs/workshop-pdfs -type f -ls || echo "No files found"
+          # List PDFs
+          echo "PDFs in destination folder:"
+          ls -la bugsweeper-docs/workshop-pdfs/
         shell: bash
-
+      
+      # Create index.html
       - name: Create index.html
         run: |
-          cd bugsweeper-docs
-          
-          # Generate index.html
-          cat > index.html << EOL
+          cat > bugsweeper-docs/index.html << EOL
           <!DOCTYPE html>
           <html lang="en">
           <head>
@@ -255,30 +195,41 @@ jobs:
           EOL
           
           # Add links to each PDF file
-          for pdf in workshop-pdfs/*.pdf; do
+          for pdf in bugsweeper-docs/workshop-pdfs/*.pdf; do
             if [ -f "$pdf" ]; then
               filename=$(basename "$pdf")
               name=$(echo "${filename%.pdf}" | sed 's/-‐-/ - /g')
-              echo "    <li><a href=\"$pdf\" target=\"_blank\">$name</a></li>" >> index.html
+              echo "    <li><a href=\"workshop-pdfs/$filename\" target=\"_blank\">$name</a></li>" >> bugsweeper-docs/index.html
             fi
           done
           
-          # Close the HTML content
-          cat >> index.html << EOL
+          # Add last updated date
+          cat >> bugsweeper-docs/index.html << EOL
               </ul>
               
-              <p class="timestamp">Last updated: $(date '+%B %d, %Y %H:%M')</p>
+              <p class="timestamp">Last updated: $(date '+%B %d, %Y %H:%M') UTC</p>
           </body>
           </html>
           EOL
-          
-          echo "Created index.html file"
         shell: bash
-
-      - name: Commit and push changes to GitHub Pages
+      
+      # Commit and push changes
+      - name: Configure Git
         run: |
           cd bugsweeper-docs
-          git add --all
-          git commit -m "Updated workshop PDFs - $(date '+%Y-%m-%d %H:%M')"
-          git push origin main
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+        shell: bash
+      
+      - name: Commit changes
+        run: |
+          cd bugsweeper-docs
+          git add workshop-pdfs/*.pdf index.html
+          git commit -m "Updated workshop PDFs - $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
+        shell: bash
+      
+      - name: Push changes
+        run: |
+          cd bugsweeper-docs
+          git push
         shell: bash
