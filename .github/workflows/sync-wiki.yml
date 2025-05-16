@@ -18,7 +18,7 @@ jobs:
           repository: milica-banjac-igt/bugsweeper-docs
           path: bugsweeper-docs
           # Use a fine-grained PAT stored in repository secrets
-          token: ${{ secrets.WIKI_TOKEN }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       
       # Clone the wiki repository
       - name: Clone wiki repository
