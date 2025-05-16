@@ -18,17 +18,16 @@ jobs:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           path: bugsweeper-docs
 
-      - name: Check out wiki repository
-        uses: actions/checkout@v3
-        with:
-          repository: igt-all/BugSweeper-Workshops.wiki
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          path: wiki-repo
-
       - name: Set up Git identity
         run: |
           git config --global user.email "wiki-sync@example.com"
           git config --global user.name "Wiki Sync Action"
+
+      # Using git clone with token embedded instead of actions/checkout for the wiki
+      - name: Clone wiki repository with embedded token
+        run: |
+          git clone https://x-access-token:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/igt-all/BugSweeper-Workshops.wiki.git wiki-repo
+        shell: bash
 
       - name: Process images
         run: |
